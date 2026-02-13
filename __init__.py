@@ -1,20 +1,35 @@
 # ComfyUI Claude Code Plugin
 # A floating window extension for Claude Code integration
+# Windows-compatible version - terminal disabled, REST endpoints enabled
 
 import asyncio
 import json
 import os
-import pty
-import select
-import struct
-import fcntl
-import termios
-import signal
-import hashlib
-import resource
 import sys
+import struct
+import hashlib
 from pathlib import Path
 from aiohttp import web
+
+# Platform detection
+IS_WINDOWS = sys.platform == "win32"
+
+# Unix-only imports (for terminal functionality)
+if not IS_WINDOWS:
+    import pty
+    import select
+    import fcntl
+    import termios
+    import signal
+    import resource
+else:
+    # Stub for Windows
+    pty = None
+    select = None
+    fcntl = None
+    termios = None
+    signal = None
+    resource = None
 
 WEB_DIRECTORY = "./js"
 
@@ -38,7 +53,7 @@ def has_claude_conversation(working_dir=None):
 
     # Convert path to Claude's folder naming format
     abs_path = os.path.abspath(working_dir)
-    folder_name = abs_path.replace("/", "-")
+    folder_name = abs_path.replace("/", "-").replace("\\", "-")
 
     project_dir = claude_dir / folder_name
 
@@ -87,6 +102,14 @@ def find_executable(name, verbose=False):
         f"/root/.local/bin/{name}",
         f"/home/*/.local/bin/{name}",
     ]
+
+    # Windows-specific paths
+    if IS_WINDOWS:
+        common_paths.extend([
+            os.path.expanduser(f"~\\AppData\\Local\\Programs\\{name}\\{name}.exe"),
+            os.path.expanduser(f"~\\AppData\\Roaming\\npm\\{name}.cmd"),
+            os.path.expanduser(f"~\\.claude\\local\\{name}.exe"),
+        ])
 
     import glob
     for pattern in common_paths:
@@ -182,7 +205,10 @@ def get_claude_command(working_dir=None):
 
 
 class WebSocketTerminal:
-    """Manages a PTY session connected via WebSocket."""
+    """Manages a PTY session connected via WebSocket.
+    
+    Note: Only functional on Unix systems. On Windows, this is a stub.
+    """
 
     def __init__(self):
         self.fd = None
@@ -194,6 +220,10 @@ class WebSocketTerminal:
 
     def spawn(self, command=None):
         """Spawn a new PTY with an optional command."""
+        if IS_WINDOWS:
+            print("[Claude Code] Terminal not supported on Windows")
+            return False
+            
         # Get the user's default shell
         shell = os.environ.get("SHELL", "/bin/bash")
 
@@ -216,7 +246,6 @@ class WebSocketTerminal:
                 os.execlpe(shell, f"-{shell_name}", env)
         else:
             # Parent process - set non-blocking mode for async reads
-            import fcntl
             flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
             fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
             self.running = True
@@ -224,57 +253,63 @@ class WebSocketTerminal:
 
     def resize(self, rows, cols):
         """Resize the PTY and notify the child process."""
-        if self.fd:
-            winsize = struct.pack("HHHH", rows, cols, 0, 0)
-            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, winsize)
-            # Send SIGWINCH to notify the child process of the size change
-            if self.pid:
-                try:
-                    os.kill(self.pid, signal.SIGWINCH)
-                except OSError:
-                    pass
+        if IS_WINDOWS or not self.fd:
+            return
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, winsize)
+        # Send SIGWINCH to notify the child process of the size change
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGWINCH)
+            except OSError:
+                pass
 
     def write(self, data):
         """Write data to the PTY."""
-        if self.fd:
-            os.write(self.fd, data.encode("utf-8"))
+        if IS_WINDOWS or not self.fd:
+            return
+        os.write(self.fd, data.encode("utf-8"))
 
     def read_nonblock(self):
         """Non-blocking read from PTY, returns None if no data available."""
-        if self.fd:
-            try:
-                data = os.read(self.fd, 4096)
-                if data:
-                    # Use incremental decoder to handle partial UTF-8 sequences
-                    if self._decoder is None:
-                        import codecs
-                        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                    return self._decoder.decode(data)
-            except BlockingIOError:
-                # No data available
-                return None
-            except (OSError, IOError):
-                self.running = False
+        if IS_WINDOWS or not self.fd:
+            return None
+        try:
+            data = os.read(self.fd, 4096)
+            if data:
+                # Use incremental decoder to handle partial UTF-8 sequences
+                if self._decoder is None:
+                    import codecs
+                    self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                return self._decoder.decode(data)
+        except BlockingIOError:
+            # No data available
+            return None
+        except (OSError, IOError):
+            self.running = False
         return None
 
     def read_blocking(self):
         """Blocking read with short select timeout for use with run_in_executor."""
-        if self.fd:
-            try:
-                ready, _, _ = select.select([self.fd], [], [], 0.001)  # 1ms timeout
-                if ready:
-                    data = os.read(self.fd, 4096)
-                    if self._decoder is None:
-                        import codecs
-                        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                    return self._decoder.decode(data)
-            except (OSError, IOError):
-                self.running = False
+        if IS_WINDOWS or not self.fd:
+            return None
+        try:
+            ready, _, _ = select.select([self.fd], [], [], 0.001)  # 1ms timeout
+            if ready:
+                data = os.read(self.fd, 4096)
+                if self._decoder is None:
+                    import codecs
+                    self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                return self._decoder.decode(data)
+        except (OSError, IOError):
+            self.running = False
         return None
 
     def close(self):
         """Close the PTY."""
         self.running = False
+        if IS_WINDOWS:
+            return
         if self.fd:
             try:
                 os.close(self.fd)
@@ -307,12 +342,20 @@ MEMORY_LOG_INTERVAL = 60  # Log every 60 seconds at most
 
 def get_memory_mb():
     """Get current memory usage in MB."""
-    # ru_maxrss is in bytes on Linux, kilobytes on macOS
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    if sys.platform == "darwin":
-        return usage.ru_maxrss / (1024 * 1024)  # KB to MB
+    if IS_WINDOWS:
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / (1024 * 1024)
+        except ImportError:
+            return 0
     else:
-        return usage.ru_maxrss / 1024  # bytes to MB
+        # ru_maxrss is in bytes on Linux, kilobytes on macOS
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        if sys.platform == "darwin":
+            return usage.ru_maxrss / (1024 * 1024)  # KB to MB
+        else:
+            return usage.ru_maxrss / 1024  # bytes to MB
 
 
 def log_memory(context=""):
@@ -478,6 +521,15 @@ async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
+    if IS_WINDOWS:
+        # Send a message indicating terminal is not supported on Windows
+        await ws.send_str(json.dumps({
+            "type": "error",
+            "message": "Terminal not supported on Windows. Use Clawdbot or Claude Code CLI directly."
+        }))
+        await ws.close()
+        return ws
+
     session_id = id(ws)
     terminal = WebSocketTerminal()
     terminal_sessions[session_id] = terminal
@@ -606,7 +658,9 @@ async def mcp_status_handler(request):
         if os.path.isfile(mcp_server_path):
             return web.json_response({
                 "connected": True,
-                "tools": 15  # Known tool count
+                "tools": 15,  # Known tool count
+                "platform": "windows" if IS_WINDOWS else "unix",
+                "terminal_supported": not IS_WINDOWS
             })
         else:
             return web.json_response({
@@ -621,6 +675,34 @@ async def mcp_status_handler(request):
         })
 
 
+async def platform_info_handler(request):
+    """Return platform information."""
+    return web.json_response({
+        "platform": sys.platform,
+        "is_windows": IS_WINDOWS,
+        "terminal_supported": not IS_WINDOWS,
+        "python_version": sys.version,
+        "comfyui_url": get_comfyui_url_cached()
+    })
+
+
+_comfyui_url_cache = None
+
+def get_comfyui_url_cached():
+    """Get the cached ComfyUI URL."""
+    global _comfyui_url_cache
+    if _comfyui_url_cache:
+        return _comfyui_url_cache
+    try:
+        from server import PromptServer
+        address = PromptServer.instance.address
+        port = PromptServer.instance.port
+        _comfyui_url_cache = f"http://{address}:{port}"
+        return _comfyui_url_cache
+    except:
+        return "http://127.0.0.1:8188"
+
+
 def setup_routes(app):
     """Set up the WebSocket and API routes."""
     app.router.add_get("/ws/claude-terminal", websocket_handler)
@@ -631,19 +713,20 @@ def setup_routes(app):
     app.router.add_post("/claude-code/graph-command", graph_command_handler)
     app.router.add_get("/claude-code/mcp-status", mcp_status_handler)
     app.router.add_get("/claude-code/memory", memory_stats_handler)
+    app.router.add_get("/claude-code/platform", platform_info_handler)
     print("[Claude Code] Terminal WebSocket endpoint registered at /ws/claude-terminal")
     print("[Claude Code] Workflow API endpoint registered at /claude-code/workflow")
     print("[Claude Code] Run node endpoint registered at /claude-code/run-node")
     print("[Claude Code] Graph command endpoint registered at /claude-code/graph-command")
     print("[Claude Code] MCP status endpoint registered at /claude-code/mcp-status")
     print("[Claude Code] Memory stats endpoint registered at /claude-code/memory")
+    print("[Claude Code] Platform info endpoint registered at /claude-code/platform")
+    if IS_WINDOWS:
+        print("[Claude Code] Note: Terminal functionality disabled on Windows")
 
 
 def write_comfyui_url():
     """Write the ComfyUI server URL to a file for the MCP server to read."""
-    import os
-    from pathlib import Path
-
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
     url_file = os.path.join(plugin_dir, ".comfyui_url")
 
@@ -665,7 +748,6 @@ def write_comfyui_url():
 
 def setup_mcp_config():
     """Set up MCP server configuration for Claude Code using claude mcp add."""
-    import os
     import subprocess
     import shutil
 
@@ -725,11 +807,17 @@ try:
     # Write ComfyUI URL for MCP server
     write_comfyui_url()
 
-    # Set up MCP configuration
-    setup_mcp_config()
+    # Set up MCP configuration (skip on Windows if claude not found)
+    if not IS_WINDOWS:
+        setup_mcp_config()
+    else:
+        print("[Claude Code] Skipping MCP auto-config on Windows (use Clawdbot instead)")
 
     # Log initial memory usage
     mem_mb = get_memory_mb()
-    print(f"[Claude Code] Plugin loaded successfully (Memory: {mem_mb:.1f}MB)")
+    platform_note = " (Windows - terminal disabled)" if IS_WINDOWS else ""
+    print(f"[Claude Code] Plugin loaded successfully{platform_note} (Memory: {mem_mb:.1f}MB)")
 except Exception as e:
     print(f"[Claude Code] Failed to register routes: {e}")
+    import traceback
+    traceback.print_exc()
