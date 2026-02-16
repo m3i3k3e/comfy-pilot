@@ -53,7 +53,7 @@ Claude Code CLI will be installed automatically if not found.
 
 ## Demo
 
-https://github.com/user-attachments/assets/df7d61f0-f5fd-4579-8d96-f920b5191728
+https://github.com/user-attachments/assets/325b1194-2334-48a1-94c3-86effd1fef02
 
 ## Usage
 
