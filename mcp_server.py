@@ -511,6 +511,11 @@ def edit_graph(operations) -> str:
 
     Returns node_id for create operations so subsequent operations can reference it.
     """
+    if isinstance(operations, str):
+        try:
+            operations = json.loads(operations)
+        except json.JSONDecodeError:
+            return json.dumps({"error": "Invalid operations: expected a JSON array or object"})
     if isinstance(operations, dict):
         operations = [operations]
 
