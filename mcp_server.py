@@ -515,9 +515,11 @@ def edit_graph(operations) -> str:
         try:
             operations = json.loads(operations)
         except json.JSONDecodeError:
-            return json.dumps({"error": "Invalid operations: expected a JSON array or object"})
+            return "error: Invalid operations: expected a JSON array or object"
     if isinstance(operations, dict):
         operations = [operations]
+    if not isinstance(operations, list):
+        return "error: Invalid operations: expected a JSON array or object"
 
     # Cache node types for validation
     all_nodes = get_object_info_cached()
