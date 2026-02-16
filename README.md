@@ -7,7 +7,7 @@
 
 Talk to your ComfyUI workflows. Comfy Pilot gives Claude Code direct access to see, edit, and run your workflows — with an embedded terminal right inside ComfyUI.
 
-https://github.com/ConstantineB6/Comfy-Pilot/releases/download/v1.0.24/comfy-pilot-layout-final.mp4
+![Comfy Pilot](thumbnail.jpg)
 
 ## Why?
 
