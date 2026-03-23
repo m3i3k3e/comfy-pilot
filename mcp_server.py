@@ -57,7 +57,7 @@ def get_comfyui_url() -> str:
             pass
 
     # Try common ports
-    for port in [8000, 8188, 8189]:
+    for port in [8188, 8190, 8000, 8189]:
         url = f"http://127.0.0.1:{port}"
         try:
             req = urllib.request.Request(f"{url}/system_stats", method="GET")
@@ -888,6 +888,189 @@ def send_graph_command(action: str, params: dict) -> dict:
         "params": params
     })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1 capabilities
+# ---------------------------------------------------------------------------
+
+def set_node_mode(node_id: str, mode: int) -> dict:
+    """Set node mode: 0=active, 2=mute, 4=bypass."""
+    return send_graph_command("set_node_mode", {"node_id": str(node_id), "mode": mode})
+
+
+def find_nodes(type_filter: str = None, title_filter: str = None,
+               widget_name: str = None, widget_value: str = None) -> str:
+    """Search nodes in the current workflow by type, title, or widget value."""
+    workflow_data = get_workflow()
+    if isinstance(workflow_data, dict) and "error" in workflow_data:
+        return json.dumps(workflow_data)
+
+    workflow = workflow_data.get("workflow", {}) if isinstance(workflow_data, dict) else {}
+    nodes = workflow.get("nodes", [])
+    if not nodes:
+        return "No nodes in workflow"
+
+    results = []
+    for node in nodes:
+        ntype = node.get("type", "")
+        ntitle = node.get("title") or ntype
+        nid = node.get("id")
+
+        # Type filter
+        if type_filter and type_filter.lower() not in ntype.lower():
+            continue
+
+        # Title filter
+        if title_filter and title_filter.lower() not in ntitle.lower():
+            continue
+
+        # Widget value filter
+        widgets_values = node.get("widgets_values", [])
+        if widget_name or widget_value:
+            if widget_value is not None:
+                found = any(str(widget_value).lower() in str(v).lower()
+                           for v in widgets_values if v is not None)
+                if not found:
+                    continue
+
+        mode_names = {0: "active", 2: "muted", 4: "bypassed"}
+        node_mode = node.get("mode", 0)
+
+        entry = {
+            "id": nid,
+            "type": ntype,
+            "title": ntitle,
+            "pos": node.get("pos", [0, 0]),
+            "mode": mode_names.get(node_mode, f"unknown({node_mode})"),
+        }
+        if widgets_values:
+            # Include first few widget values as preview
+            entry["widgets_preview"] = widgets_values[:5]
+        results.append(entry)
+
+    if not results:
+        return "No matching nodes found"
+    return json.dumps(results, indent=2)
+
+
+def get_nodes_batch(node_ids: list = None, type_filter: str = None) -> str:
+    """Get widget values for multiple nodes at once."""
+    workflow_data = get_workflow()
+    if isinstance(workflow_data, dict) and "error" in workflow_data:
+        return json.dumps(workflow_data)
+
+    workflow = workflow_data.get("workflow", {}) if isinstance(workflow_data, dict) else {}
+    nodes = workflow.get("nodes", [])
+    if not nodes:
+        return "No nodes in workflow"
+
+    # Filter by IDs or type
+    target_ids = set(int(i) for i in node_ids) if node_ids else None
+    results = []
+    for node in nodes:
+        nid = node.get("id")
+        ntype = node.get("type", "")
+
+        if target_ids and nid not in target_ids:
+            continue
+        if type_filter and type_filter.lower() not in ntype.lower():
+            continue
+
+        mode_names = {0: "active", 2: "muted", 4: "bypassed"}
+        entry = {
+            "id": nid,
+            "type": ntype,
+            "title": node.get("title") or ntype,
+            "mode": mode_names.get(node.get("mode", 0), "unknown"),
+            "widgets_values": node.get("widgets_values", []),
+            "pos": node.get("pos", [0, 0]),
+            "size": node.get("size", [200, 100]),
+        }
+        results.append(entry)
+
+    if not results:
+        return "No matching nodes found"
+    return json.dumps(results, indent=2)
+
+
+def get_execution_errors(last_n: int = 5) -> str:
+    """Get recent execution errors captured from the frontend."""
+    result = send_graph_command("get_execution_errors", {"last_n": last_n})
+    if isinstance(result, dict) and "error" in result:
+        return json.dumps(result)
+    errors = result.get("errors", [])
+    if not errors:
+        return "No execution errors captured"
+    return json.dumps(errors, indent=2)
+
+
+def save_workflow(path: str) -> str:
+    """Save the current workflow to a file."""
+    result = send_graph_command("save_workflow", {})
+    if isinstance(result, dict) and "error" in result:
+        return json.dumps(result)
+    workflow = result.get("workflow")
+    if not workflow:
+        return json.dumps({"error": "No workflow data returned from frontend"})
+    try:
+        # Ensure directory exists
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(workflow, f, indent=2)
+        return json.dumps({"status": "saved", "path": os.path.abspath(path),
+                          "nodes": len(workflow.get("nodes", []))})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to write file: {e}"})
+
+
+def list_instances() -> str:
+    """Scan common ports for running ComfyUI instances."""
+    instances = []
+    for port in [8188, 8189, 8190, 8191, 8000]:
+        url = f"http://127.0.0.1:{port}"
+        try:
+            req = urllib.request.Request(f"{url}/system_stats", method="GET")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                stats = json.loads(resp.read().decode())
+                devices = stats.get("devices", [])
+                gpu_info = devices[0] if devices else {}
+                instances.append({
+                    "port": port,
+                    "url": url,
+                    "status": "online",
+                    "gpu": gpu_info.get("name", "unknown"),
+                    "vram_total_gb": round(gpu_info.get("vram_total", 0) / (1024**3), 1) if gpu_info.get("vram_total") else None,
+                    "vram_free_gb": round(gpu_info.get("vram_free", 0) / (1024**3), 1) if gpu_info.get("vram_free") else None,
+                    "active": url == get_active_comfyui_url(),
+                })
+        except Exception:
+            continue
+    if not instances:
+        return "No ComfyUI instances found on common ports (8188-8191, 8000)"
+    return json.dumps(instances, indent=2)
+
+
+def switch_instance(port: int) -> str:
+    """Switch the MCP server to target a different ComfyUI instance."""
+    global COMFYUI_URL
+    url = f"http://127.0.0.1:{port}"
+    try:
+        req = urllib.request.Request(f"{url}/system_stats", method="GET")
+        with urllib.request.urlopen(req, timeout=2):
+            COMFYUI_URL = url
+            return json.dumps({"status": "switched", "url": url, "port": port})
+    except Exception as e:
+        return json.dumps({"error": f"Cannot connect to instance on port {port}: {e}"})
+
+
+def get_active_comfyui_url() -> str:
+    """Get the currently active ComfyUI URL."""
+    global COMFYUI_URL
+    if COMFYUI_URL is None:
+        COMFYUI_URL = get_comfyui_url()
+    return COMFYUI_URL
 
 
 def create_node(nodes) -> dict:
@@ -2704,6 +2887,92 @@ def handle_request(request: dict) -> dict:
                             },
                             "required": ["url", "model_type"]
                         }
+                    },
+                    {
+                        "name": "set_node_mode",
+                        "description": "Set a node's mode: active, muted, or bypassed. Use to toggle features on/off without deleting nodes.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "node_id": {"type": "string", "description": "Node ID"},
+                                "mode": {
+                                    "type": "integer",
+                                    "enum": [0, 2, 4],
+                                    "description": "0 = active (normal), 2 = muted (skipped), 4 = bypassed (pass-through)"
+                                }
+                            },
+                            "required": ["node_id", "mode"]
+                        }
+                    },
+                    {
+                        "name": "find_nodes",
+                        "description": "Search for nodes in the current workflow by type, title, or widget value. Returns compact list with IDs, types, titles, positions, and mode.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "description": "Filter by node type (partial match, case-insensitive)"},
+                                "title": {"type": "string", "description": "Filter by node title (partial match, case-insensitive)"},
+                                "widget_value": {"type": "string", "description": "Filter by widget value (partial match across all widgets)"}
+                            }
+                        }
+                    },
+                    {
+                        "name": "get_nodes_batch",
+                        "description": "Get widget values for multiple nodes at once. More efficient than calling get_node_info repeatedly.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "node_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "List of node IDs to read. If omitted, returns all nodes (use type_filter to narrow)."
+                                },
+                                "type_filter": {"type": "string", "description": "Filter by node type (partial match, case-insensitive)"}
+                            }
+                        }
+                    },
+                    {
+                        "name": "get_execution_errors",
+                        "description": "Get recent execution errors from ComfyUI. Returns error messages, tracebacks, and the node that failed.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "last_n": {
+                                    "type": "integer",
+                                    "description": "Number of recent errors to return (default: 5, max: 10)"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "save_workflow",
+                        "description": "Save the current workflow to a JSON file on disk.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "File path to save to (e.g., 'D:/Comfy/workflows/my_workflow.json')"}
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "list_instances",
+                        "description": "Scan common ports for running ComfyUI instances. Returns port, status, GPU info, and which instance is currently active.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    {
+                        "name": "switch_instance",
+                        "description": "Switch all subsequent MCP commands to target a different ComfyUI instance by port.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "port": {"type": "integer", "description": "Port number of the ComfyUI instance to switch to"}
+                            },
+                            "required": ["port"]
+                        }
                     }
                 ]
             }
@@ -2798,6 +3067,38 @@ def handle_request(request: dict) -> dict:
                     filename=tool_args.get("filename"),
                     hf_token=tool_args.get("hf_token"),
                     subfolder=tool_args.get("subfolder")
+                )
+
+            # Sprint 1 tools
+            elif tool_name == "set_node_mode":
+                result = set_node_mode(
+                    node_id=tool_args.get("node_id", ""),
+                    mode=int(tool_args.get("mode", 0))
+                )
+            elif tool_name == "find_nodes":
+                result = find_nodes(
+                    type_filter=tool_args.get("type"),
+                    title_filter=tool_args.get("title"),
+                    widget_value=tool_args.get("widget_value")
+                )
+            elif tool_name == "get_nodes_batch":
+                result = get_nodes_batch(
+                    node_ids=tool_args.get("node_ids"),
+                    type_filter=tool_args.get("type_filter")
+                )
+            elif tool_name == "get_execution_errors":
+                result = get_execution_errors(
+                    last_n=int(tool_args.get("last_n", 5))
+                )
+            elif tool_name == "save_workflow":
+                result = save_workflow(
+                    path=tool_args.get("path", "")
+                )
+            elif tool_name == "list_instances":
+                result = list_instances()
+            elif tool_name == "switch_instance":
+                result = switch_instance(
+                    port=int(tool_args.get("port", 8188))
                 )
 
             else:

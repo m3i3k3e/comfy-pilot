@@ -997,6 +997,31 @@ async function checkMcpStatus() {
 }
 
 // Workflow sync - send current workflow to backend periodically
+// Execution error capture — stores last 10 errors for MCP retrieval
+const executionErrors = [];
+const MAX_ERRORS = 10;
+
+function captureExecutionErrors() {
+    // Listen for execution_error events from ComfyUI's API
+    if (typeof api !== "undefined" && api.addEventListener) {
+        api.addEventListener("execution_error", (evt) => {
+            const detail = evt.detail || {};
+            executionErrors.push({
+                timestamp: new Date().toISOString(),
+                node_id: detail.node_id,
+                node_type: detail.node_type,
+                exception_message: detail.exception_message,
+                exception_type: detail.exception_type,
+                traceback: detail.traceback,
+                prompt_id: detail.prompt_id,
+            });
+            if (executionErrors.length > MAX_ERRORS) executionErrors.shift();
+            console.warn("[Comfy-Pilot] Execution error captured:", detail.exception_message);
+        });
+        console.log("[Comfy-Pilot] Execution error capture active");
+    }
+}
+
 function startWorkflowSync() {
     // Sync immediately and then every 2 seconds
     syncWorkflow();
@@ -1005,6 +1030,9 @@ function startWorkflowSync() {
     // Also poll for graph commands
     pollGraphCommands();
     setInterval(pollGraphCommands, 200);
+
+    // Start capturing execution errors
+    captureExecutionErrors();
 }
 
 // Track if workflow has changed to avoid unnecessary syncs
@@ -1336,6 +1364,31 @@ async function executeGraphCommand(command) {
                 };
             }
 
+            case "load_workflow": {
+                // Load a workflow from the server's userdata
+                try {
+                    const filename = params.filename;
+                    if (!filename) {
+                        return { error: "filename is required" };
+                    }
+                    const encodedPath = encodeURIComponent(`workflows/${filename}`);
+                    const resp = await fetch(`/userdata/${encodedPath}`);
+                    if (!resp.ok) {
+                        return { error: `Failed to fetch workflow: ${resp.status} ${resp.statusText}` };
+                    }
+                    const workflowData = await resp.json();
+                    await app.loadGraphData(workflowData);
+                    app.graph.setDirtyCanvas(true, true);
+                    return {
+                        status: "loaded",
+                        filename: filename,
+                        nodes: app.graph._nodes ? app.graph._nodes.length : 0
+                    };
+                } catch (e) {
+                    return { error: `Failed to load workflow: ${e.message}` };
+                }
+            }
+
             case "move_node": {
                 const nodeId = parseInt(params.node_id);
                 const node = app.graph.getNodeById(nodeId);
@@ -1412,6 +1465,30 @@ async function executeGraphCommand(command) {
                     pos: node.pos,
                     size: node.size
                 };
+            }
+
+            case "set_node_mode": {
+                const nodeId = parseInt(params.node_id);
+                const node = app.graph.getNodeById(nodeId);
+                if (!node) return { error: `Node ${params.node_id} not found` };
+                // LiteGraph modes: 0=ALWAYS (active), 2=NEVER (mute), 4=BYPASS
+                const mode = parseInt(params.mode);
+                if (![0, 2, 4].includes(mode)) return { error: `Invalid mode ${mode}. Use 0 (active), 2 (mute), or 4 (bypass)` };
+                node.mode = mode;
+                app.graph.setDirtyCanvas(true, true);
+                const modeNames = { 0: "active", 2: "muted", 4: "bypassed" };
+                return { status: "mode_set", node_id: params.node_id, mode: mode, mode_name: modeNames[mode] };
+            }
+
+            case "save_workflow": {
+                const workflow = app.graph.serialize();
+                return { status: "ok", workflow: workflow };
+            }
+
+            case "get_execution_errors": {
+                const lastN = parseInt(params.last_n) || 5;
+                const errors = executionErrors.slice(-lastN);
+                return { status: "ok", errors: errors, total_captured: executionErrors.length };
             }
 
             default:
